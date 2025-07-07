@@ -44,6 +44,7 @@ st.session_state.setdefault("new_player",     "")
 # --------- Streamlit Layout ---------
 st.set_page_config(page_title="Campeonato Liga + Mata-Mata", layout="centered", page_icon="⚽")
 st.title("⚽ Campeonato – Liga + Mata-Mata")
+initial_sidebar_state="collapsed"
 
 # … seu código de imports e st.set_page_config acima …
 
