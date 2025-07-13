@@ -1,342 +1,334 @@
+# gerenciador_fifa_grupos.py
 import streamlit as st
-import json
-import os
 import random
 import math
 import pandas as pd
-from itertools import combinations
+import itertools
+import json
+import os
 
 # ----------------- Paths -----------------
-PLAYERS_FILE      = "players.json"
-LEAGUE_MATCHES    = "league_matches.json"
-LEAGUE_RESULTS    = "league_results.json"
-BRACKETS_FILE     = "brackets.json"
-KNOCK_RESULTS     = "knock_results.json"
+BASE_DIR = "dados"
+os.makedirs(BASE_DIR, exist_ok=True)
 
-# ------------- Utils JSON -------------
-def load_json(path, default):
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
+def path(nome):
+    return os.path.join(BASE_DIR, nome)
+
+# --------- Utils JSON ---------
+def load_json(file, default):
+    try:
+        with open(path(file), "r", encoding="utf-8") as f:
             return json.load(f)
-    return default
+    except:
+        return default
 
-def save_json(path, data):
-    with open(path, "w", encoding="utf-8") as f:
+def save_json(file, data):
+    with open(path(file), "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-# --------- Compat rerun ---------
-if hasattr(st, "experimental_rerun"):
-    _rerun = st.experimental_rerun
-elif hasattr(st, "script_request_rerun"):
-    _rerun = st.script_request_rerun
-else:
-    _rerun = lambda: None
+# --------- Funções auxiliares ---------
+def formatar_nome(nome):
+    return ' '.join(part.capitalize() for part in nome.strip().split())
 
-# ------- Inicializa session_state -------
-st.session_state.setdefault("players",        load_json(PLAYERS_FILE, []))
-st.session_state.setdefault("stage",          None)    # None, "league","semifinal","third","final"
-st.session_state.setdefault("league_matches", load_json(LEAGUE_MATCHES, []))
-st.session_state.setdefault("league_results", load_json(LEAGUE_RESULTS, []))
-st.session_state.setdefault("brackets",       load_json(BRACKETS_FILE, {}))
-st.session_state.setdefault("knock_results",  load_json(KNOCK_RESULTS, []))
-st.session_state.setdefault("new_player",     "")
+# --------- Session State ---------
+st.session_state.setdefault("jogadores", load_json("jogadores.json", []))
+st.session_state.setdefault("fase", None)
+st.session_state.setdefault("grupos", load_json("grupos.json", {}))
+st.session_state.setdefault("resultados", load_json("resultados.json", []))
+st.session_state.setdefault("eliminatorias", load_json("eliminatorias.json", []))
+st.session_state.setdefault("fase_elim", 1)
+st.session_state.setdefault("proximos_classificados", [])
+st.session_state.setdefault("proximos_eliminados", [])
+st.session_state.setdefault("finalistas", [])
+st.session_state.setdefault("semifinalistas_eliminados", [])
 
-# --------- Streamlit Layout ---------
-st.set_page_config(page_title="Campeonato Liga + Mata-Mata", layout="centered", page_icon="⚽")
-st.title("⚽ Campeonato – Liga + Mata-Mata")
-initial_sidebar_state="collapsed"
+# --------- Funções ---------
+def dividir_em_grupos(jogadores):
+    random.shuffle(jogadores)
+    n = len(jogadores)
+    for tamanho_ideal in range(5, 2, -1):
+        num_grupos = math.ceil(n / tamanho_ideal)
+        if 2 <= num_grupos <= n:
+            break
+    grupos = [[] for _ in range(num_grupos)]
+    for i, jogador in enumerate(jogadores):
+        grupos[i % num_grupos].append(jogador)
+    return {f"Grupo {i+1}": g for i, g in enumerate(grupos)}
 
-# … seu código de imports e st.set_page_config acima …
+def gerar_partidas_grupo(grupo):
+    return list(itertools.combinations(grupo, 2))
 
-# ————— Botão de reset geral —————
-st.sidebar.markdown("---")
-if st.sidebar.button("🔄 Reiniciar Campeonato (limpar tudo)"):
-    # limpa session_state
-    st.session_state.players        = []
-    st.session_state.stage          = None
-    st.session_state.league_matches = []
-    st.session_state.league_results = []
-    st.session_state.brackets       = {}
-    st.session_state.knock_results  = []
-    st.session_state.new_player     = ""
-    # grava JSONs zerados
-    save_json(PLAYERS_FILE, [])
-    save_json(LEAGUE_MATCHES, [])
-    save_json(LEAGUE_RESULTS, [])
-    save_json(BRACKETS_FILE, {})
-    save_json(KNOCK_RESULTS, [])
-    # recarrega a aplicação
-    _rerun()
-
-# … resto do seu código …
-
-# ------------- Helpers -------------
-def compute_league_ranking():
-    """Retorna um DataFrame com a classificação da liga (round robin)."""
-    players = st.session_state.players
-    lr = st.session_state.league_results
-    if not lr:
-        return None
-
-    stats = {p: {"Pts":0,"GP":0,"GC":0} for p in players}
-    jogos_cnt = {p:0 for p in players}
-
-    for r in lr:
-        t1,t2 = r["time1"], r["time2"]
-        g1,g2 = r["g1"], r["g2"]
-        # gols
-        stats[t1]["GP"] += g1; stats[t1]["GC"] += g2; jogos_cnt[t1] += 1
-        stats[t2]["GP"] += g2; stats[t2]["GC"] += g1; jogos_cnt[t2] += 1
-        # pontos
-        if g1>g2:
-            stats[t1]["Pts"] += 3
-        elif g2>g1:
-            stats[t2]["Pts"] += 3
-        else:
-            # empate na liga: 1 ponto cada
-            stats[t1]["Pts"] += 1
-            stats[t2]["Pts"] += 1
-
-    data = []
-    for p in players:
-        pts = stats[p]["Pts"]
-        gp  = stats[p]["GP"]
-        gc  = stats[p]["GC"]
-        sg  = gp - gc
-        jogos = jogos_cnt[p]
-        aproveit = round((pts/(jogos*3)*100) if jogos>0 else 0,2)
-        data.append({
-            "Time": p,
-            "Pontos": pts,
-            "Gols Pró": gp,
-            "Gols Contra": gc,
-            "Saldo de Gols": sg,
-            "% Aproveitamento": aproveit
-        })
-
-    df = (
-        pd.DataFrame(data)
-          .sort_values(["Pontos","Saldo de Gols"], ascending=[False,False])
-          .reset_index(drop=True)
-    )
-    return df
-
-def build_history_with_pct():
-    """Retorna lista de dicts para o histórico, incluindo % de aproveitamento daquela partida."""
-    hist = []
-    for r in st.session_state.league_results:
-        t1,t2 = r["time1"], r["time2"]
-        g1,g2 = r["g1"], r["g2"]
-        # pontos daquele match
-        if g1>g2:
-            p1,p2 = 3,0
-        elif g2>g1:
-            p1,p2 = 0,3
-        else:
-            # empate na liga: 1 ponto cada
-            p1,p2 = 1,1
-        pct1 = round(p1/3*100,2); pct2 = round(p2/3*100,2)
-        entry = {
-            "fase":"Liga",
-            "time1":t1, "time2":t2,
-            "g1":g1, "g2":g2,
-            "%Ap1":pct1, "%Ap2":pct2
-        }
-        hist.append(entry)
-    for r in st.session_state.knock_results:
-        t1,t2 = r["time1"], r["time2"]
-        g1,g2 = r.get("g1"), r.get("g2")
-        # penas
-        if g1 is None or g2 is None:
-            p1=p2=0
-        else:
-            if g1>g2:
-                p1,p2 = 3,0
-            elif g2>g1:
-                p1,p2 = 0,3
+def classificar_grupo(grupo, resultados):
+    stats = {j: {"Pts":0, "GP":0, "GC":0, "V":0, "J":0} for j in grupo}
+    for r in resultados:
+        if r["j1"] in grupo and r["j2"] in grupo:
+            j1, j2, g1, g2 = r["j1"], r["j2"], r["g1"], r["g2"]
+            stats[j1]["GP"] += g1
+            stats[j1]["GC"] += g2
+            stats[j2]["GP"] += g2
+            stats[j2]["GC"] += g1
+            stats[j1]["J"] += 1
+            stats[j2]["J"] += 1
+            if g1 > g2:
+                stats[j1]["Pts"] += 3
+                stats[j1]["V"] += 1
+            elif g2 > g1:
+                stats[j2]["Pts"] += 3
+                stats[j2]["V"] += 1
             else:
-                # desempate via p1/p2
-                pp1,pp2 = r.get("p1",0), r.get("p2",0)
-                if pp1>pp2:
-                    p1,p2 = 3,0
-                else:
-                    p1,p2 = 0,3
-        pct1 = round(p1/3*100,2); pct2 = round(p2/3*100,2)
-        entry = {
-            "fase": r["fase"].capitalize(),
-            "time1":t1, "time2":t2,
-            "g1":g1, "g2":g2,
-            "p1": r.get("p1"), "p2": r.get("p2"),
-            "%Ap1":pct1, "%Ap2":pct2
-        }
-        hist.append(entry)
-    return hist
+                stats[j1]["Pts"] += 1
+                stats[j2]["Pts"] += 1
+    df = pd.DataFrame([{
+        "Jogador": j,
+        "Pontos": v["Pts"],
+        "GP": v["GP"],
+        "GC": v["GC"],
+        "SG": v["GP"] - v["GC"],
+        "% Aproveitamento": round((v["V"] / v["J"] * 100) if v["J"] > 0 else 0, 1)
+    } for j,v in stats.items()])
+    return df.sort_values(["Pontos","SG"], ascending=False).reset_index(drop=True)
 
-# --------- Histórico de Partidas na Sidebar ---------
-st.sidebar.subheader("📖 Histórico de Partidas")
-df_hist = pd.DataFrame(build_history_with_pct())
-st.sidebar.dataframe(df_hist, use_container_width=True)
+def gerar_chave_eliminatoria(jogadores):
+    if len(jogadores) == 2:
+        return [tuple(jogadores)]
+    random.shuffle(jogadores)
+    if len(jogadores) % 2 == 1:
+        jogadores.append(None)
+    return [(jogadores[i], jogadores[i+1]) for i in range(0, len(jogadores), 2)]
 
-# --------- Adicionar Jogador ---------
-st.subheader("Adicionar Jogador (pressione Enter)")
-def add_player():
-    nome = st.session_state.new_player.strip().title()
-    if nome and nome not in st.session_state.players:
-        st.session_state.players.append(nome)
-        save_json(PLAYERS_FILE, st.session_state.players)
-    st.session_state.new_player = ""
-    _rerun()
-
-st.text_input("", key="new_player", placeholder="Ex: Maria Clara", on_change=add_player)
-with st.expander("📓 Jogadores cadastrados"):
-    st.write(st.session_state.players)
-players = st.session_state.players
-
-# --------- 1) Liga (Round Robin) ---------
-if st.session_state.stage is None:
-    if len(players) >= 2 and st.button("▶️ Iniciar Liga (Round Robin)"):
-        lm = list(combinations(players, 2))
-        random.shuffle(lm)
-        st.session_state.league_matches = lm
-        st.session_state.league_results = []
-        st.session_state.stage = "league"
-        save_json(LEAGUE_MATCHES, lm)
-        save_json(LEAGUE_RESULTS, [])
-        _rerun()
-
-if st.session_state.stage == "league":
-    st.subheader("🔄 Fase de Liga – Registrar Resultados")
-    lm = st.session_state.league_matches
-    lr = st.session_state.league_results
-
-    pend = [
-        m for m in lm
-        if not any(
-            (r["time1"], r["time2"]) == m or (r["time2"], r["time1"]) == m
-            for r in lr
-        )
-    ]
-
-    if pend:
-        sel = st.selectbox("Selecione partida:", pend, format_func=lambda x: f"{x[0]} vs {x[1]}")
-        g1 = st.number_input(f"Gols {sel[0]}", 0, key="lg1")
-        g2 = st.number_input(f"Gols {sel[1]}", 0, key="lg2")
-
-        # empate → pênaltis
-        p1=p2=None
-        if g1 == g2:
-            st.warning("🔔 Empate! Informe o placar de pênaltis:")
-            p1 = st.number_input(f"Pênaltis {sel[0]}", 0, key="lp1")
-            p2 = st.number_input(f"Pênaltis {sel[1]}", 0, key="lp2")
-
-        if st.button("Salvar Resultado Liga"):
-            entry = {"time1":sel[0],"time2":sel[1],"g1":int(g1),"g2":int(g2)}
-            if p1 is not None:
-                entry["p1"],entry["p2"] = int(p1),int(p2)
-            lr.append(entry)
-            save_json(LEAGUE_RESULTS, lr)
-            _rerun()
-    else:
-        st.success("✅ Todos os resultados da liga registrados!")
-
-    # mostra classificação da liga aqui mesmo
-    st.subheader("📊 Classificação da Liga")
-    df_league = compute_league_ranking()
-    if df_league is not None:
-        st.dataframe(df_league, use_container_width=True)
-        st.download_button(
-            "⬇️ Exportar Classificação (Liga)",
-            df_league.to_csv(index=False),
-            file_name="classificacao_liga.csv",
-            mime="text/csv"
-        )
-
-    # botões para gerar mata-mata
-    if df_league is not None and len(lr)==len(lm):
-        if len(players)>=4 and st.button("⚔️ Gerar Semifinais (Top 4)"):
-            top4 = df_league["Time"].tolist()[:4]
-            st.session_state.brackets = {
-                "semifinal":[(top4[0],top4[3]),(top4[1],top4[2])]
-            }
-            st.session_state.knock_results = []
-            st.session_state.stage = "semifinal"
-            save_json(BRACKETS_FILE, st.session_state.brackets)
-            save_json(KNOCK_RESULTS, [])
-            _rerun()
-        elif len(players)==2 and st.button("🏆 Ir para Final Direta"):
-            st.session_state.brackets={"final":[(players[0],players[1])]}
-            st.session_state.knock_results=[]
-            st.session_state.stage="final"
-            save_json(BRACKETS_FILE, st.session_state.brackets)
-            save_json(KNOCK_RESULTS, [])
-            _rerun()
-
-# --------- 2) Mata-Mata com Pênaltis ---------
-if st.session_state.stage in ["semifinal","third","final"]:
-    st.subheader("🎯 Fases Mata-Mata")
-    brackets = st.session_state.brackets
-    kres     = st.session_state.knock_results
-
-    for ph in ["semifinal","third","final"]:
-        if ph not in brackets:
-            continue
-        label = "Terceira Posição" if ph=="third" else ph.capitalize()
-        st.markdown(f"## {label}")
-        pairs = brackets[ph]
-        done  = {(r["fase"],r["time1"],r["time2"]) for r in kres}
-        pend  = [m for m in pairs if (ph,m[0],m[1]) not in done]
-
-        if pend:
-            sel = st.selectbox(f"{label} – selecione:", pend, key=ph,
-                               format_func=lambda x: f"{x[0]} vs {x[1]}")
-            a,b = sel
-            g1 = st.number_input(f"Gols {a}", 0, key=f"{ph}_g1")
-            g2 = st.number_input(f"Gols {b}", 0, key=f"{ph}_g2")
-
-            p1=p2=None
-            if g1==g2:
-                st.warning("🔔 Empate! Informe o placar de pênaltis:")
-                p1 = st.number_input(f"Pênaltis {a}",0, key=f"pen1_{ph}")
-                p2 = st.number_input(f"Pênaltis {b}",0, key=f"pen2_{ph}")
-
-            if st.button(f"Salvar Resultado {label}", key=f"btn_{ph}"):
-                if g1>g2 or (g1==g2 and (p1 or 0)>(p2 or 0)):
-                    w,l = a,b
-                else:
-                    w,l = b,a
-                rec = {"fase":ph,"time1":a,"time2":b,"g1":g1,"g2":g2,"winner":w,"loser":l}
-                if p1 is not None:
-                    rec["p1"],rec["p2"] = p1,p2
-                kres.append(rec)
-                save_json(KNOCK_RESULTS, kres)
-
-                if ph=="semifinal":
-                    # gera third e final
-                    if len([r for r in kres if r["fase"]=="semifinal"])\
-                       == len(brackets["semifinal"]):
-                        wins = [r["winner"] for r in kres if r["fase"]=="semifinal"]
-                        lose = [r["loser"]  for r in kres if r["fase"]=="semifinal"]
-                        brackets["third"] = [(lose[0],lose[1])]
-                        brackets["final"] = [(wins[0],wins[1])]
-                        save_json(BRACKETS_FILE, brackets)
-                _rerun()
+def gerar_ranking_geral(resultados):
+    stats = {}
+    for r in resultados:
+        for j in [r["j1"], r["j2"]]:
+            if j not in stats:
+                stats[j] = {"J": 0, "V": 0, "Pts": 0, "GP": 0, "GC": 0}
+        stats[r["j1"]]["J"] += 1
+        stats[r["j2"]]["J"] += 1
+        stats[r["j1"]]["GP"] += r["g1"]
+        stats[r["j1"]]["GC"] += r["g2"]
+        stats[r["j2"]]["GP"] += r["g2"]
+        stats[r["j2"]]["GC"] += r["g1"]
+        if r["g1"] > r["g2"]:
+            stats[r["j1"]]["V"] += 1
+            stats[r["j1"]]["Pts"] += 3
+        elif r["g2"] > r["g1"]:
+            stats[r["j2"]]["V"] += 1
+            stats[r["j2"]]["Pts"] += 3
         else:
-            st.success(f"✅ Todos resultados de **{label.lower()}** registrados!")
-            if ph=="final":
-                champ = [r["winner"] for r in kres if r["fase"]=="final"][0]
-                st.balloons(); st.success(f"🏆 Campeão: **{champ}**")
+            stats[r["j1"]]["Pts"] += 1
+            stats[r["j2"]]["Pts"] += 1
 
-# -------------------------------------------------
-#  🚩 Sempre ao final, exibe de novo a classificação da Liga
-# -------------------------------------------------
-df_league = compute_league_ranking()
-if df_league is not None:
-    st.markdown("---")
-    st.subheader("📊 Classificação Geral da Liga")
-    st.dataframe(df_league, use_container_width=True)
-    st.download_button(
-        "⬇️ Exportar Classificação Geral",
-        df_league.to_csv(index=False),
-        file_name="classificacao_geral.csv",
-        mime="text/csv"
-    )
+    df = pd.DataFrame([{
+        "Jogador": j,
+        "Pontos": v["Pts"],
+        "Vitórias": v["V"],
+        "GP": v["GP"],
+        "GC": v["GC"],
+        "SG": v["GP"] - v["GC"],
+        "% Aproveitamento": round((v["V"] / v["J"]) * 100, 1) if v["J"] > 0 else 0
+    } for j, v in stats.items()])
+    return df.sort_values(by=["Pontos", "SG", "GP"], ascending=False).reset_index(drop=True)
+
+# --------- Layout ---------
+st.title("⚽ Gerenciador de Partidas FIFA - Grupos + Eliminatórias")
+
+# --------- Reset ---------
+if st.sidebar.button("Reiniciar Campeonato"):
+    for nome in ["jogadores.json", "grupos.json", "resultados.json", "eliminatorias.json"]:
+        save_json(nome, [] if nome.endswith(".json") else {})
+    st.session_state.clear()
+    st.rerun()
+
+# --------- Adicionar Jogadores ---------
+st.subheader("👥 Adicionar Jogadores")
+
+# Inicializa a variável somente se ainda não existir
+if "input_jogador" not in st.session_state:
+    st.session_state.input_jogador = ""
+
+with st.form("adicionar_jogador_form"):
+    novo_jogador = st.text_input("Nome do jogador", value=st.session_state.input_jogador, key="input_jogador")
+    submitted = st.form_submit_button("Adicionar")
+    if submitted:
+        nome_formatado = formatar_nome(novo_jogador)
+        if nome_formatado and nome_formatado not in st.session_state.jogadores:
+            st.session_state.jogadores.append(nome_formatado)
+            save_json("jogadores.json", st.session_state.jogadores)
+        # Em vez de tentar limpar direto, só marca pra resetar
+        st.session_state.pop("input_jogador")  # Força o reset do campo
+        st.rerun()
+
+
+st.write("Jogadores:", st.session_state.jogadores)
+
+
+
+# --------- Criar Grupos ---------
+if st.session_state.fase is None and len(st.session_state.jogadores) >= 4:
+    if st.button("Iniciar Fase de Grupos"):
+        grupos = dividir_em_grupos(st.session_state.jogadores)
+        st.session_state.grupos = grupos
+        st.session_state.fase = "grupos"
+        save_json("grupos.json", grupos)
+        st.rerun()
+
+# --------- Fase de Grupos ---------
+if st.session_state.fase == "grupos":
+    st.header("🏟️ Fase de Grupos")
+    for nome, grupo in st.session_state.grupos.items():
+        st.subheader(nome)
+        partidas = gerar_partidas_grupo(grupo)
+        for p in partidas:
+            if not any(r for r in st.session_state.resultados if (r["j1"], r["j2"]) == p or (r["j2"], r["j1"]) == p):
+                col1, col2 = st.columns(2)
+                with col1:
+                    g1 = st.number_input(f"Gols {p[0]}", min_value=0, key=f"g1_{p}")
+                with col2:
+                    g2 = st.number_input(f"Gols {p[1]}", min_value=0, key=f"g2_{p}")
+                if st.button(f"Salvar Resultado {p[0]} vs {p[1]}", key=f"btn_{p}"):
+                    st.session_state.resultados.append({"j1": p[0], "j2": p[1], "g1": int(g1), "g2": int(g2)})
+                    save_json("resultados.json", st.session_state.resultados)
+                    st.rerun()
+        df = classificar_grupo(grupo, st.session_state.resultados)
+        st.dataframe(df, use_container_width=True)
+
+    total_partidas = sum(len(gerar_partidas_grupo(g)) for g in st.session_state.grupos.values())
+    if len(st.session_state.resultados) >= total_partidas:
+        st.success("✅ Todas as partidas dos grupos foram registradas!")
+        classificados = []
+        for grupo in st.session_state.grupos.values():
+            df = classificar_grupo(grupo, st.session_state.resultados)
+            classificados.extend(df["Jogador"].head(2).tolist())
+        chaves = gerar_chave_eliminatoria(classificados)
+        st.session_state.eliminatorias = chaves
+        st.session_state.fase = "eliminatorias"
+        st.session_state.fase_elim = 1
+        save_json("eliminatorias.json", chaves)
+        st.rerun()
+
+# --------- Fase Eliminatória ---------
+if st.session_state.fase == "eliminatorias":
+    fase = st.session_state.fase_elim
+    if fase == 1:
+        st.header("🏆 Partidas da Semifinal")
+    elif fase == 2:
+        st.header("🥉 Disputa de 3º Lugar")
+    elif fase == 3:
+        st.header("🏆 Final")
+
+    todas_concluidas = True
+    for i, par in enumerate(st.session_state.eliminatorias):
+        if par is None:
+            continue
+        j1, j2 = par
+        if j1 is None or j2 is None:
+            vencedor = j1 or j2
+            if vencedor:
+                st.info(f"{vencedor} está classificado automaticamente (bye)")
+                st.session_state.finalistas.append(vencedor)
+            st.session_state.eliminatorias[i] = None
+            continue
+
+        st.subheader(f"{j1} vs {j2}")
+        col1, col2 = st.columns(2)
+        with col1:
+            g1 = st.number_input(f"Gols {j1}", min_value=0, key=f"elim_g1_{i}")
+        with col2:
+            g2 = st.number_input(f"Gols {j2}", min_value=0, key=f"elim_g2_{i}")
+        p1 = p2 = None
+        if g1 == g2:
+            st.warning("Empate! Insira o resultado dos pênaltis:")
+            col1, col2 = st.columns(2)
+            with col1:
+                p1 = st.number_input(f"Pênaltis {j1}", min_value=0, key=f"pen1_{i}")
+            with col2:
+                p2 = st.number_input(f"Pênaltis {j2}", min_value=0, key=f"pen2_{i}")
+
+        if st.button(f"Salvar Resultado {j1} vs {j2}", key=f"elim_btn_{i}"):
+            if g1 > g2:
+                vencedor, perdedor = j1, j2
+            elif g2 > g1:
+                vencedor, perdedor = j2, j1
+            else:
+                if p1 is not None and p2 is not None:
+                    vencedor, perdedor = (j1, j2) if p1 > p2 else (j2, j1)
+                else:
+                    st.warning("Preencha os pênaltis.")
+                    st.stop()
+
+            if fase == 1:
+                st.session_state.finalistas.append(vencedor)
+                st.session_state.semifinalistas_eliminados.append(perdedor)
+            elif fase == 2:
+                st.session_state.proximos_classificados.append(vencedor)
+
+            st.session_state.resultados.append({
+                "j1": j1, "j2": j2,
+                "g1": int(g1), "g2": int(g2),
+                "pen1": p1, "pen2": p2
+            })
+            save_json("resultados.json", st.session_state.resultados)
+            st.session_state.eliminatorias[i] = None
+            st.rerun()
+        else:
+            todas_concluidas = False
+
+    if todas_concluidas and all(p is None for p in st.session_state.eliminatorias):
+        if fase == 1:
+            st.session_state.eliminatorias = gerar_chave_eliminatoria(st.session_state.semifinalistas_eliminados)
+            st.session_state.fase_elim = 2
+        elif fase == 2:
+            st.session_state.eliminatorias = gerar_chave_eliminatoria(st.session_state.finalistas)
+            st.session_state.fase_elim = 3
+        elif fase == 3:
+            campeao = st.session_state.finalistas[0] if st.session_state.finalistas else "Erro"
+            st.balloons()
+            st.success(f"🏆 CAMPEÃO: {campeao}")
+            st.session_state.fase = "fim"
+        st.rerun()
+
+# --------- Ranking Geral Final ---------
+if st.session_state.fase == "fim":
+    st.header("📊 Ranking Geral do Campeonato")
+    df = gerar_ranking_geral(st.session_state.resultados)
+    st.dataframe(df, use_container_width=True)
+
+    # Determinar finalistas e 3º colocado corretamente
+    resultados = st.session_state.resultados
+
+    # Final: último resultado
+    final = resultados[-1]
+    if final["g1"] > final["g2"]:
+        campeao = final["j1"]
+        vice = final["j2"]
+    elif final["g2"] > final["g1"]:
+        campeao = final["j2"]
+        vice = final["j1"]
+    else:
+        # Se empate, usa pênaltis
+        campeao = final["j1"] if final["pen1"] > final["pen2"] else final["j2"]
+        vice = final["j2"] if campeao == final["j1"] else final["j1"]
+
+    # Disputa de 3º lugar: penúltimo resultado
+    terceiro_lugar_match = resultados[-2]
+    if terceiro_lugar_match["g1"] > terceiro_lugar_match["g2"]:
+        terceiro = terceiro_lugar_match["j1"]
+    elif terceiro_lugar_match["g2"] > terceiro_lugar_match["g1"]:
+        terceiro = terceiro_lugar_match["j2"]
+    else:
+        terceiro = terceiro_lugar_match["j1"] if terceiro_lugar_match["pen1"] > terceiro_lugar_match["pen2"] else terceiro_lugar_match["j2"]
+
+    st.subheader("🏅 Pódio Final")
+    st.markdown(f"🥇 **1º Lugar:** {campeao}")
+    st.markdown(f"🥈 **2º Lugar:** {vice}")
+    st.markdown(f"🥉 **3º Lugar:** {terceiro}")
+
+    # Destaques individuais
+    destaque_ataque = df.sort_values("GP", ascending=False).iloc[0]
+    destaque_defesa = df.sort_values("GC").iloc[0]
+    destaque_furada = df.sort_values("GC", ascending=False).iloc[0]
+
+    st.subheader("✨ Destaques Individuais")
+    st.info(f"🔥 **Ataque Imparável:** {destaque_ataque['Jogador']} com {destaque_ataque['GP']} gols feitos.")
+    st.info(f"🛡️ **Defesa Perfeita:** {destaque_defesa['Jogador']} com apenas {destaque_defesa['GC']} gols sofridos.")
+    st.info(f"😬 **Defesa Furada:** {destaque_furada['Jogador']} com {destaque_furada['GC']} gols sofridos.")
